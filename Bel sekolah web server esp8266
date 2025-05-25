@@ -1,0 +1,148 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+// Pin untuk bel
+#define BEL_PIN D1
+
+// Struktur penyimpanan jadwal di EEPROM
+struct Schedule {
+  int hour;
+  int minute;
+  int duration;
+};
+
+ESP8266WebServer server(80);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200, 60000);
+
+const char* ssid = "NamaWiFi";
+const char* password = "PasswordWiFi";
+
+Schedule schedules[10]; // Maksimal 10 jadwal
+int scheduleCount = 0;
+bool bellActive = false;
+unsigned long bellStartTime = 0;
+int bellDuration = 0;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BEL_PIN, OUTPUT);
+  digitalWrite(BEL_PIN, LOW);
+  
+  EEPROM.begin(512);
+  loadSchedules();
+  
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  timeClient.begin();
+  
+  Serial.println("");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/set", handleSetSchedule);
+  server.on("/get", handleGetTime);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  timeClient.update();
+  
+  if (bellActive) {
+    if (millis() - bellStartTime >= bellDuration * 1000) {
+      digitalWrite(BEL_PIN, LOW);
+      bellActive = false;
+    }
+  } else {
+    checkSchedule();
+  }
+}
+
+void handleRoot() {
+  String html = "<html><body>";
+  html += "<h1>Jadwal Bel Sekolah</h1>";
+  html += "<form action='/set'>";
+  html += "Jumlah Jadwal: <input type='number' name='count' min='1' max='10' value='" + String(scheduleCount) + "'><br>";
+  
+  for(int i=0; i<scheduleCount; i++) {
+    html += "Jadwal " + String(i+1) + ": ";
+    html += "<input type='time' name='t" + String(i) + "' value='" + 
+            String(schedules[i].hour) + ":" + 
+            (schedules[i].minute < 10 ? "0" : "") + String(schedules[i].minute) + "'> ";
+    html += "Durasi (detik): <input type='number' name='d" + String(i) + "' value='" + String(schedules[i].duration) + "'><br>";
+  }
+  
+  html += "<input type='submit' value='Simpan'>";
+  html += "</form>";
+  html += "<p>Waktu Sekarang: <span id='time'></span></p>";
+  html += "<script>setInterval(()=>{fetch('/get').then(r=>r.text()).then(t=>document.getElementById('time').innerHTML=t)},1000)</script>";
+  html += "</body></html>";
+  
+  server.send(200, "text/html", html);
+}
+
+void handleSetSchedule() {
+  scheduleCount = server.arg("count").toInt();
+  
+  for(int i=0; i<scheduleCount; i++) {
+    String time = server.arg("t" + String(i));
+    int colonIndex = time.indexOf(":");
+    schedules[i].hour = time.substring(0, colonIndex).toInt();
+    schedules[i].minute = time.substring(colonIndex+1).toInt();
+    schedules[i].duration = server.arg("d" + String(i)).toInt();
+  }
+  
+  saveSchedules();
+  server.sendHeader("Location", "/");
+  server.send(302);
+}
+
+void handleGetTime() {
+  String currentTime = timeClient.getFormattedTime();
+  server.send(200, "text/plain", currentTime);
+}
+
+void checkSchedule() {
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+  int currentSecond = timeClient.getSeconds();
+  
+  for(int i=0; i<scheduleCount; i++) {
+    if(schedules[i].hour == currentHour && 
+       schedules[i].minute == currentMinute &&
+       currentSecond == 0) {
+      triggerBell(schedules[i].duration);
+    }
+  }
+}
+
+void triggerBell(int duration) {
+  digitalWrite(BEL_PIN, HIGH);
+  bellActive = true;
+  bellStartTime = millis();
+  bellDuration = duration;
+}
+
+void saveSchedules() {
+  EEPROM.put(0, scheduleCount);
+  EEPROM.put(sizeof(int), schedules);
+  EEPROM.commit();
+}
+
+void loadSchedules() {
+  EEPROM.get(0, scheduleCount);
+  if(scheduleCount < 1 || scheduleCount > 10) {
+    scheduleCount = 0;
+    return;
+  }
+  EEPROM.get(sizeof(int), schedules);
+}
